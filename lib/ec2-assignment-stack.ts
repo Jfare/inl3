@@ -1,15 +1,16 @@
 import * as cdk from 'aws-cdk-lib';
 import { Stack } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
-import { HostedZone, IHostedZone, HostedZoneAttributes } from 'aws-cdk-lib/aws-route53';
+import { IHostedZone } from 'aws-cdk-lib/aws-route53';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { ManagedPolicy } from 'aws-cdk-lib/aws-iam';
 import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2'
 import * as autoscaling from 'aws-cdk-lib/aws-autoscaling';
 import { aws_route53 as route53 } from 'aws-cdk-lib';
-import { Route53RecordTarget } from 'aws-cdk-lib/aws-route53-targets';
 import * as route53Targets from 'aws-cdk-lib/aws-route53-targets';
+import * as rds from 'aws-cdk-lib/aws-rds';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 
 
 export class Ec2AssignmentStack extends Stack {
@@ -26,16 +27,34 @@ export class Ec2AssignmentStack extends Stack {
       zoneName: 'cloud-ha.com',
     });
 
+    // Vpc skapad
+    const vpc = new ec2.Vpc(this, 'MyVPC');
+
+    const databaseCredentialsSecret = new rds.DatabaseSecret(this, 'DatabaseCredentialsSecret', {
+      username: 'master',
+    },);
+
+    const database = new rds.DatabaseInstance(this, 'Database', {
+      engine: rds.DatabaseInstanceEngine.postgres({ version: rds.PostgresEngineVersion.VER_13 }),
+      credentials: rds.Credentials.fromSecret(databaseCredentialsSecret), // Använd hemligheten du just skapade
+      vpc,
+      instanceType: ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.MICRO),
+      allocatedStorage: 20,
+      multiAz: false,
+      storageType: rds.StorageType.GP2,
+      deletionProtection: false,
+    });
+
     // Add userdata for ec2 instance
     userData.addCommands(
       "yum install docker -y",
       "sudo systemctl start docker",
       "aws ecr get-login-password --region eu-north-1 | docker login --username AWS --password-stdin 292370674225.dkr.ecr.eu-north-1.amazonaws.com",
-      "docker run -d --name my-application -p 80:8080 292370674225.dkr.ecr.eu-north-1.amazonaws.com/webshop-api:latest"
+      `docker run -d -e DB_URL='my-postgres-url.eu-north-1.rds.amazonaws.com'`,
+      `-e DB_USERNAME='master' -e DB_PASSWORD='mastermaster'`,
+      "-e SPRING_PROFILES_ACTIVE='postgres' --name my-application -p 80:8080 292370674225.dkr.ecr.eu-north-1.amazonaws.com/webshop-api:latest"
     );
 
-    // Vpc skapad
-    const vpc = new ec2.Vpc(this, 'MyVPC');
 
     // Security group skapad
     const securityGroup = new ec2.SecurityGroup(this, 'JohnAlexandraSecurityGroup', {
@@ -56,6 +75,16 @@ export class Ec2AssignmentStack extends Stack {
       internetFacing: true,
       securityGroup: lbSecurityGroup
     });
+
+    // Skapa en säkerhetsgrupp för din RDS-instans
+    const databaseSecurityGroup = new ec2.SecurityGroup(this, 'DatabaseSecurityGroup', {
+      vpc,
+      description: 'Security group for RDS database',
+    });
+
+    // Tillåt inkommande trafik från din EC2-säkerhetsgrupp
+    databaseSecurityGroup.addIngressRule(securityGroup, ec2.Port.tcp(5432), 'Allow inbound traffic from EC2 security group');
+
 
     securityGroup.addIngressRule(lbSecurityGroup, ec2.Port.tcp(80), 'Allow inbound HTTP traffic from load balancer');
 
