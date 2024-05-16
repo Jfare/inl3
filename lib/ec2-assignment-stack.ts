@@ -13,6 +13,19 @@ export class Ec2AssignmentStack extends Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
+    const userData = ec2.UserData.forLinux();
+
+    // Add userdata for ec2 instance
+    userData.addCommands(
+      "yum install docker -y",
+      "sudo systemctl start docker",
+      "aws ecr get-login-password --region eu-north-1 | docker login --username AWS --password-stdin 292370674225.dkr.ecr.eu-north-1.amazonaws.com",
+      "docker run -d --name my-application -p 80:8080 292370674225.dkr.ecr.eu-north-1.amazonaws.com/webshop-api:latest"
+    );
+
+
+
+
     const vpc = new ec2.Vpc(this, 'MyVPC');
     // Security group skapad
     const securityGroup = new ec2.SecurityGroup(this, 'JohnAlexandraSecurityGroup', {
@@ -41,6 +54,7 @@ export class Ec2AssignmentStack extends Stack {
         generation: ec2.AmazonLinuxGeneration.AMAZON_LINUX_2,
         cpuType: ec2.AmazonLinuxCpuType.X86_64
       }),
+      userData: userData
     });
 
   }
