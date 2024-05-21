@@ -17,14 +17,17 @@ export class Ec2AssignmentStack extends Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
-    const userData = ec2.UserData.forLinux();
-
     const hostedZone = route53.HostedZone.fromHostedZoneAttributes(this, 'HaHostedZone', {
       hostedZoneId: 'Z0413857YT73A0A8FRFF',
       zoneName: 'cloud-ha.com',
     });
 
-    const vpc = new ec2.Vpc(this, 'MyVPC');
+    const vpc = ec2.Vpc.fromLookup(this, "MyVpc", {
+      isDefault: true,
+      region: "eu-north-1"
+      
+    });
+
 
     const databaseCredentialsSecret = new rds.DatabaseSecret(this, 'DatabaseCredentialsSecret', {
       username: 'master',
@@ -37,28 +40,41 @@ export class Ec2AssignmentStack extends Stack {
     //     ManagedPolicy.fromAwsManagedPolicyName("AmazonRDSCloudWatchLogsRole")
     //   ]
     // });
+    const role = new iam.Role(this, 'EC2Role', {
+      assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com'),
+      managedPolicies: [
+        ManagedPolicy.fromAwsManagedPolicyName("AmazonSSMManagedInstanceCore"),
+        ManagedPolicy.fromAwsManagedPolicyName("AmazonEC2ContainerRegistryReadOnly"),
+        ManagedPolicy.fromAwsManagedPolicyName("AmazonRDSFullAccess")
+      ]
+    });
+
+
+    databaseCredentialsSecret.grantRead(role);
 
     const database = new rds.DatabaseInstance(this, 'Database', {
       engine: rds.DatabaseInstanceEngine.postgres({ version: rds.PostgresEngineVersion.VER_16_2 }),
       credentials: rds.Credentials.fromSecret(databaseCredentialsSecret),
       vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PUBLIC },
       instanceType: ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.MICRO),
       allocatedStorage: 20,
       multiAz: false,
       storageType: rds.StorageType.GP2,
       deletionProtection: false,
-      monitoringInterval: cdk.Duration.seconds(60),  // Set the monitoring interval
       cloudwatchLogsExports: ['postgresql'] // Enable log exports
     });
 
+    // Skapar userData för ec2 instans.
+    const userData = ec2.UserData.forLinux();
+
     userData.addCommands(
-      "yum install docker -y",
-      "sudo systemctl start docker",
-      "aws ecr get-login-password --region eu-north-1 | docker login --username AWS --password-stdin 292370674225.dkr.ecr.eu-north-1.amazonaws.com",
-      "DB_PASSWORD=$(aws secretsmanager get-secret-value --secret-id ${databaseCredentialsSecret.secretArn} --query SecretString --output text | jq -r .password)",
-      "docker run -d -e DB_URL='john-farell-ec2-assignment-databaseb269d8bb-fy4rjcsrwth2.chbvabsbak05.eu-north-1.rds.amazonaws.com'",
-      "-e DB_USERNAME='master' -e DB_PASSWORD=$DB_PASSWORD",
-      "-e SPRING_PROFILES_ACTIVE='postgres' --name my-application -p 80:8080 292370674225.dkr.ecr.eu-north-1.amazonaws.com/webshop-api:latest"
+      `yum install docker -y`,
+      `sudo yum install jq -y`,
+      `sudo systemctl start docker`,
+      `aws ecr get-login-password --region eu-north-1 | docker login --username AWS --password-stdin 292370674225.dkr.ecr.eu-north-1.amazonaws.com`,
+      `DB_PASSWORD=$(aws secretsmanager get-secret-value --secret-id '${databaseCredentialsSecret.secretArn}' --query SecretString --output text --region eu-north-1 | jq -r .password)`,
+      `docker run -d -e DB_URL='${database.dbInstanceEndpointAddress}' -e DB_USERNAME='master' -e DB_PASSWORD=$DB_PASSWORD -e SPRING_PROFILES_ACTIVE='postgres' --name my-application -p 80:8080 292370674225.dkr.ecr.eu-north-1.amazonaws.com/webshop-api:latest`,
     );
 
     const ec2SecurityGroup = new ec2.SecurityGroup(this, 'EC2SecurityGroup', {
@@ -79,25 +95,15 @@ export class Ec2AssignmentStack extends Stack {
       securityGroup: lbSecurityGroup
     });
 
-    const databaseSecurityGroup = new ec2.SecurityGroup(this, 'DatabaseSecurityGroup', {
-      vpc,
-      description: 'Security group for RDS database',
-      allowAllOutbound: true // Allows all outbound traffic
-    });
-
-    databaseSecurityGroup.addIngressRule(ec2SecurityGroup, ec2.Port.tcp(5432), 'Allow inbound traffic from EC2 instances');
+    // const databaseSecurityGroup = new ec2.SecurityGroup(this, 'DatabaseSecurityGroup', {
+    //   vpc,
+    //   description: 'Security group for RDS database',
+    //   allowAllOutbound: true // Allows all outbound traffic
+    // });
+    
+    database.connections.allowFrom(ec2SecurityGroup, ec2.Port.tcp(5432), 'Allow inbound traffic from EC2 instances');
     ec2SecurityGroup.addIngressRule(lbSecurityGroup, ec2.Port.tcp(80), 'Allow inbound HTTP traffic from load balancer');
 
-    const role = new iam.Role(this, 'EC2Role', {
-      assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com'),
-      managedPolicies: [
-        ManagedPolicy.fromAwsManagedPolicyName("AmazonSSMManagedInstanceCore"),
-        ManagedPolicy.fromAwsManagedPolicyName("AmazonEC2ContainerRegistryReadOnly"),
-        ManagedPolicy.fromAwsManagedPolicyName("AmazonRDSFullAccess")
-      ]
-    });
-
-    databaseCredentialsSecret.grantRead(role);
 
     //Update policy för att säkerställa att vår asg ersätts vid varje uppdatering.
     const updatePolicy = autoscaling.UpdatePolicy.replacingUpdate();
